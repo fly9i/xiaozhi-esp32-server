@@ -23,6 +23,17 @@ def read_config(config_path):
     return config
 
 
+def expand_env_vars(value: object) -> object:
+    """递归展开配置中的 ${ENV_VAR}，避免把密钥写入配置文件。"""
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, list):
+        return [expand_env_vars(item) for item in value]
+    if isinstance(value, Mapping):
+        return {key: expand_env_vars(item) for key, item in value.items()}
+    return value
+
+
 def load_config():
     """加载配置文件"""
     from core.utils.cache.manager import cache_manager, CacheType
@@ -53,6 +64,7 @@ def load_config():
     else:
         # 合并配置
         config = merge_configs(default_config, custom_config)
+    config = expand_env_vars(config)
     # 初始化目录
     ensure_directories(config)
 
