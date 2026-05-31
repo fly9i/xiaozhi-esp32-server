@@ -14,6 +14,15 @@ from core.handle.sendAudioHandle import send_stt_message, SentenceType
 TAG = __name__
 
 
+def _short_log(text, limit=1200):
+    if text is None:
+        return ""
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...<truncated {len(text) - limit} chars>"
+
+
 async def handleAudioMessage(conn: "ConnectionHandler", audio):
     # 当前片段是否有人说话
     have_voice = conn.vad.is_vad(conn, audio)
@@ -88,6 +97,7 @@ async def startToChat(conn: "ConnectionHandler", text):
         return
 
     # 意图未被处理，继续常规聊天流程，使用实际文本内容
+    conn.logger.bind(tag=TAG).info(f"用户输入/ASR识别文本: {_short_log(actual_text)}")
     await send_stt_message(conn, actual_text)
 
     # 准备开始新会话

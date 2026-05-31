@@ -47,6 +47,19 @@ from core.utils import textUtils
 
 TAG = __name__
 
+
+def _short_log(value: Any, limit: int = 1200) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        try:
+            value = json.dumps(value, ensure_ascii=False)
+        except Exception:
+            value = str(value)
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"...<truncated {len(value) - limit} chars>"
+
 auto_import_modules("plugins_func.functions")
 
 
@@ -204,17 +217,21 @@ class ConnectionHandler:
                 self.client_ip = real_ip.split(",")[0].strip()
             else:
                 self.client_ip = ws.remote_address[0]
-            self.logger.bind(tag=TAG).info(
-                f"{self.client_ip} conn - Headers: {self.headers}"
-            )
-
+            request_path = ws.request.path
             self.device_id = self.headers.get("device-id", None)
+            client_id = self.headers.get("client-id", self.device_id)
+            self.logger.bind(tag=TAG).info(
+                f"连接建立: session_id={self.session_id}, device_id={self.device_id}, client_id={client_id}, "
+                f"ip={self.client_ip}, path={request_path}"
+            )
+            self.logger.bind(tag=TAG).debug(
+                f"连接Headers: {json.dumps(filter_sensitive_info(self.headers), ensure_ascii=False)}"
+            )
 
             # 认证通过,继续处理
             self.websocket = ws
 
             # 检查是否来自MQTT连接
-            request_path = ws.request.path
             self.conn_from_mqtt_gateway = request_path.endswith("?from=mqtt_gateway")
             if self.conn_from_mqtt_gateway:
                 self.logger.bind(tag=TAG).info("连接来自:MQTT网关")
@@ -912,7 +929,7 @@ class ConnectionHandler:
         current_sentence_id = None
 
         if query is not None:
-            self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
+            self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {_short_log(query)}")
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
@@ -990,7 +1007,7 @@ class ConnectionHandler:
                     ),
                 )
         except Exception as e:
-            self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
+            self.logger.bind(tag=TAG).error(f"LLM 处理出错 {_short_log(query)}: {e}")
             return None
 
         # 处理流式响应
@@ -1144,6 +1161,9 @@ class ConnectionHandler:
                             da_response = self._clean_response_garbage(da_response)
                             self.tts.store_tts_text(current_sentence_id, da_response)
                             self.dialogue.put(Message(role="assistant", content=da_response))
+                            self.logger.bind(tag=TAG).info(
+                                f"LLM直接回复: {_short_log(da_response)}"
+                            )
 
                     if not real_tool_calls:
                         if depth == 0:
@@ -1159,7 +1179,7 @@ class ConnectionHandler:
                     tool_calls_list = real_tool_calls
 
             if not bHasError and len(tool_calls_list) > 0:
-                self.logger.bind(tag=TAG).debug(
+                self.logger.bind(tag=TAG).info(
                     f"检测到 {len(tool_calls_list)} 个工具调用"
                 )
 
@@ -1174,8 +1194,9 @@ class ConnectionHandler:
                 # 收集所有工具调用的 Future
                 futures_with_data = []
                 for tool_call_data in tool_calls_list:
-                    self.logger.bind(tag=TAG).debug(
-                        f"function_name={tool_call_data['name']}, function_id={tool_call_data['id']}, function_arguments={tool_call_data['arguments']}"
+                    self.logger.bind(tag=TAG).info(
+                        f"LLM请求工具调用: name={tool_call_data['name']}, id={tool_call_data['id']}, "
+                        f"arguments={_short_log(tool_call_data['arguments'])}"
                     )
 
                     # 使用公共方法上报工具调用
@@ -1199,6 +1220,10 @@ class ConnectionHandler:
                     try:
                         result = future.result(timeout=tool_call_timeout)
                         tool_results.append((result, tool_call_data))
+                        self.logger.bind(tag=TAG).info(
+                            f"工具调用完成: name={tool_call_data['name']}, action={getattr(result.action, 'name', result.action)}, "
+                            f"result={_short_log(result.result)}, response={_short_log(result.response)}"
+                        )
                         # 使用公共方法上报工具调用结果
                         enqueue_tool_report(self, tool_call_data['name'], tool_input, str(result.result) if result.result else None, report_tool_call=False)
 
@@ -1223,6 +1248,7 @@ class ConnectionHandler:
             text_buff = "".join(response_message)
             self.tts.store_tts_text(current_sentence_id, text_buff)
             self.dialogue.put(Message(role="assistant", content=text_buff))
+            self.logger.bind(tag=TAG).info(f"LLM最终回复: {_short_log(text_buff)}")
 
         if depth == 0:
             self.tts.tts_text_queue.put(
