@@ -98,11 +98,25 @@ class LLMProvider(LLMProviderBase):
 
     @staticmethod
     def normalize_dialogue(dialogue):
-        """自动修复 dialogue 中缺失 content 的消息"""
+        """修复消息格式，并将 system 消息合并到最前面。"""
+        system_contents = []
+        normalized_dialogue = []
         for msg in dialogue:
             if "role" in msg and "content" not in msg:
                 msg["content"] = ""
-        return dialogue
+            if msg.get("role") == "system":
+                content = msg.get("content")
+                if content:
+                    system_contents.append(str(content))
+            else:
+                normalized_dialogue.append(msg)
+
+        if system_contents:
+            normalized_dialogue.insert(
+                0,
+                {"role": "system", "content": "\n\n".join(system_contents)},
+            )
+        return normalized_dialogue
 
     def _apply_extra_body(self, request_params: dict):
         """应用平台默认和配置指定的额外请求参数。"""
