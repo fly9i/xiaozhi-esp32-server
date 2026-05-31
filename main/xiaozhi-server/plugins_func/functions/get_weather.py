@@ -163,6 +163,9 @@ def get_weather(conn: "ConnectionHandler", location: str = None, lang: str = "zh
     from core.utils.cache.manager import cache_manager, CacheType
 
     weather_config = conn.config.get("plugins", {}).get("get_weather", {})
+    if weather_config.get("enabled") is False:
+        return ActionResponse(Action.RESPONSE, None, "天气功能未启用")
+
     api_host = weather_config.get("api_host", "mj7p3y7naa.re.qweatherapi.com")
     api_key = weather_config.get("api_key", "a861d0d5e7bf4ee1a83d9a9e4f96d4da")
     default_location = weather_config.get("default_location", "广州")
