@@ -19,15 +19,37 @@ THINKING_DISABLED_DOMAINS = {
 }
 
 
+def _normalize_openai_base_url(base_url: str) -> str:
+    if not base_url:
+        return base_url
+    base_url = base_url.rstrip("/")
+    chat_completions_path = "/chat/completions"
+    if base_url.endswith(chat_completions_path):
+        return base_url[: -len(chat_completions_path)]
+    return base_url
+
+
+def _merge_dict(base: dict, updates: dict) -> dict:
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge_dict(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
 class LLMProvider(LLMProviderBase):
     def __init__(self, config):
         self.model_name = config.get("model_name")
         self.api_key = config.get("api_key")
         if "base_url" in config:
-            self.base_url = config.get("base_url")
+            self.base_url = _normalize_openai_base_url(config.get("base_url"))
         else:
-            self.base_url = config.get("url")
-        
+            self.base_url = _normalize_openai_base_url(config.get("url"))
+        self.extra_body = (
+            config.get("extra_body") if isinstance(config.get("extra_body"), dict) else {}
+        )
+
         timeout_config = config.get("timeout")
         if isinstance(timeout_config, dict):
             # 细粒度超时配置
@@ -35,7 +57,7 @@ class LLMProvider(LLMProviderBase):
                 pool=timeout_config.get("pool", 2.0),
                 connect=timeout_config.get("connect", 3.0),
                 write=timeout_config.get("write", 5.0),
-                read=timeout_config.get("read", 60.0)
+                read=timeout_config.get("read", 60.0),
             )
         elif isinstance(timeout_config, (int, float)) and timeout_config > 0:
             # 兼容旧的单一超时配置（整数或浮点数）
@@ -49,6 +71,7 @@ class LLMProvider(LLMProviderBase):
             "temperature": lambda x: round(float(x), 1),
             "top_p": lambda x: round(float(x), 1),
             "frequency_penalty": lambda x: round(float(x), 1),
+            "presence_penalty": lambda x: round(float(x), 1),
         }
 
         for param, converter in param_defaults.items():
@@ -69,7 +92,9 @@ class LLMProvider(LLMProviderBase):
         model_key_msg = check_model_key("LLM", self.api_key)
         if model_key_msg:
             logger.bind(tag=TAG).error(model_key_msg)
-        self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=custom_timeout)
+        self.client = openai.OpenAI(
+            api_key=self.api_key, base_url=self.base_url, timeout=custom_timeout
+        )
 
     @staticmethod
     def normalize_dialogue(dialogue):
@@ -79,15 +104,19 @@ class LLMProvider(LLMProviderBase):
                 msg["content"] = ""
         return dialogue
 
-    def _apply_thinking_disabled(self, request_params: dict):
-        """根据域名自动禁用思考模式"""
+    def _apply_extra_body(self, request_params: dict):
+        """应用平台默认和配置指定的额外请求参数。"""
+        extra_body = {}
         parsed_url = urlparse(self.base_url)
         domain = parsed_url.netloc
         for disabled_domain, params in THINKING_DISABLED_DOMAINS.items():
             if disabled_domain in domain:
-                request_params.setdefault("extra_body", {}).update(params)
+                _merge_dict(extra_body, params)
                 logger.bind(tag=TAG).info(f"为域名 {domain} 禁用思考模式，参数: {params}")
                 break
+        _merge_dict(extra_body, self.extra_body)
+        if extra_body:
+            request_params["extra_body"] = extra_body
 
     def response(self, session_id, dialogue, **kwargs):
         dialogue = self.normalize_dialogue(dialogue)
@@ -104,14 +133,14 @@ class LLMProvider(LLMProviderBase):
             "temperature": kwargs.get("temperature", self.temperature),
             "top_p": kwargs.get("top_p", self.top_p),
             "frequency_penalty": kwargs.get("frequency_penalty", self.frequency_penalty),
+            "presence_penalty": kwargs.get("presence_penalty", self.presence_penalty),
         }
 
         for key, value in optional_params.items():
             if value is not None:
                 request_params[key] = value
 
-        # 禁用思考模式
-        self._apply_thinking_disabled(request_params)
+        self._apply_extra_body(request_params)
 
         responses = self.client.chat.completions.create(**request_params)
 
@@ -150,14 +179,14 @@ class LLMProvider(LLMProviderBase):
             "temperature": kwargs.get("temperature", self.temperature),
             "top_p": kwargs.get("top_p", self.top_p),
             "frequency_penalty": kwargs.get("frequency_penalty", self.frequency_penalty),
+            "presence_penalty": kwargs.get("presence_penalty", self.presence_penalty),
         }
 
         for key, value in optional_params.items():
             if value is not None:
                 request_params[key] = value
 
-        # 禁用思考模式
-        self._apply_thinking_disabled(request_params)
+        self._apply_extra_body(request_params)
 
         stream = self.client.chat.completions.create(**request_params)
 

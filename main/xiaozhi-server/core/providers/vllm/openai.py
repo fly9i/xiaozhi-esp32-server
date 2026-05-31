@@ -8,19 +8,33 @@ TAG = __name__
 logger = setup_logging()
 
 
+def _normalize_openai_base_url(base_url: str) -> str:
+    if not base_url:
+        return base_url
+    base_url = base_url.rstrip("/")
+    chat_completions_path = "/chat/completions"
+    if base_url.endswith(chat_completions_path):
+        return base_url[: -len(chat_completions_path)]
+    return base_url
+
+
 class VLLMProvider(VLLMProviderBase):
     def __init__(self, config):
         self.model_name = config.get("model_name")
         self.api_key = config.get("api_key")
         if "base_url" in config:
-            self.base_url = config.get("base_url")
+            self.base_url = _normalize_openai_base_url(config.get("base_url"))
         else:
-            self.base_url = config.get("url")
+            self.base_url = _normalize_openai_base_url(config.get("url"))
+        self.extra_body = (
+            config.get("extra_body") if isinstance(config.get("extra_body"), dict) else {}
+        )
 
         param_defaults = {
             "max_tokens": (500, int),
             "temperature": (0.7, lambda x: round(float(x), 1)),
             "top_p": (1.0, lambda x: round(float(x), 1)),
+            "presence_penalty": (None, lambda x: round(float(x), 1)),
         }
 
         for param, (default, converter) in param_defaults.items():
@@ -57,9 +71,20 @@ class VLLMProvider(VLLMProviderBase):
                 }
             ]
 
-            response = self.client.chat.completions.create(
-                model=self.model_name, messages=messages, stream=False
-            )
+            request_params = {
+                "model": self.model_name,
+                "messages": messages,
+                "stream": False,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+            }
+            if self.presence_penalty is not None:
+                request_params["presence_penalty"] = self.presence_penalty
+            if self.extra_body:
+                request_params["extra_body"] = self.extra_body
+
+            response = self.client.chat.completions.create(**request_params)
 
             return response.choices[0].message.content
 
