@@ -45,6 +45,15 @@ def formatter(record):
     return record["message"]
 
 
+def safe_console_sink(message):
+    """忽略非阻塞终端写满导致的控制台日志错误，文件日志不受影响。"""
+    try:
+        sys.stdout.write(str(message))
+        sys.stdout.flush()
+    except (BlockingIOError, BrokenPipeError):
+        pass
+
+
 def setup_logging():
     check_config_file()
     """从配置文件中读取日志配置，并设置日志输出格式和级别"""
@@ -85,7 +94,7 @@ def setup_logging():
 
         # 输出到控制台
         logger.add(
-            sys.stdout,
+            safe_console_sink,
             format=log_format,
             level=log_level,
             filter=formatter,
