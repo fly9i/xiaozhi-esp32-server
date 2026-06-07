@@ -1094,26 +1094,31 @@ class ConnectionHandler:
             # 递归调用时，使用当前的sentence_id
             current_sentence_id = self.sentence_id
 
-        # 设置最大递归深度，避免无限循环，可根据实际需求调整
-        MAX_DEPTH = 5
-        force_final_answer = False  # 标记是否强制最终回答
+        try:
+            max_agent_steps = int(self.config.get("max_agent_steps", 5))
+        except (TypeError, ValueError):
+            max_agent_steps = 5
+        if max_agent_steps < 1:
+            max_agent_steps = 5
+        agent_step = depth + 1
+        force_final_answer = False
+        self.logger.bind(tag=TAG).info(
+            f"Agent Loop step {agent_step}/{max_agent_steps}"
+        )
 
-        if depth >= MAX_DEPTH:
-            self.logger.bind(tag=TAG).debug(
-                f"已达到最大工具调用深度 {MAX_DEPTH}，将强制基于现有信息回答"
+        if agent_step >= max_agent_steps:
+            self.logger.bind(tag=TAG).info(
+                f"Agent Loop 已到第 {agent_step} 轮，禁用工具并直接生成最终回答"
             )
             force_final_answer = True
-            # 添加系统指令，要求 LLM 基于现有信息回答
             self.dialogue.put(
                 Message(
                     role="user",
-                    content="[系统提示] 已达到最大工具调用次数限制，请你基于目前已经获取的所有信息，直接给出最终答案。不要再尝试调用任何工具。",
+                    content="[系统提示] Agent 已达到最大推理轮数。请基于目前已经获取的所有信息，直接给出最终回答。不要再尝试调用任何工具。",
                 )
             )
 
-        # Define intent functions
         functions = None
-        # 达到最大深度时，禁用工具调用，强制 LLM 直接回答
         if (
                 self.intent_type == "function_call"
                 and hasattr(self, "func_handler")
