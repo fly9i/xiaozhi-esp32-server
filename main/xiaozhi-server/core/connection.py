@@ -86,6 +86,17 @@ DIRECT_ANSWER_TOOL = {
     },
 }
 
+FUNCTION_CALL_TOOL_GUIDANCE = """
+
+<tool_call_rules>
+- 当前环境使用 OpenAI 原生 tool_calls。需要操作设备、灯带、屏幕、提醒、音乐、搜索等外部能力时，必须返回 tool_calls，不要只用文字声称已经完成。
+- 当用户要求“来几个”“多个”“依次试试”“都执行”“再来几个效果”等多个独立动作时，可以在同一个 assistant 消息里返回多个 tool_calls。
+- 多个 tool_calls 必须只包含真实可用工具；不要编造不存在的效果或工具。
+- 如果用户要求设备动作，优先调用对应工具；不要用 direct_answer 替代工具调用。
+- 工具调用消息不要混入解释文本。工具结果返回后，再基于结果给用户简短说明。
+</tool_call_rules>
+"""
+
 
 class ConnectionHandler:
     def __init__(
@@ -557,6 +568,8 @@ class ConnectionHandler:
             emoji_enabled=(self.features or {}).get("emoji", True),
         )
         if enhanced_prompt:
+            if self.intent_type == "function_call":
+                enhanced_prompt += FUNCTION_CALL_TOOL_GUIDANCE
             self.change_system_prompt(enhanced_prompt)
             self.logger.bind(tag=TAG).debug("系统提示词已增强更新")
 
@@ -617,6 +630,58 @@ class ConnectionHandler:
             self.dialogue.put(Message(
                 role="assistant", content="再见，下次再聊~", is_temporary=True,
             ))
+
+        # 示例3：多个真实工具调用。强化“来几个效果”应一次返回多个 tool_calls，而不是只口头列举。
+        led_effect_tools = [
+            ("self_led_strip_breath", "fewshot_led_breath", '{"success":true,"mode":"breath","gpio":9}'),
+            ("self_led_strip_comet", "fewshot_led_comet", '{"success":true,"mode":"comet","gpio":9}'),
+            ("self_led_strip_theater", "fewshot_led_theater", '{"success":true,"mode":"theater","gpio":9}'),
+            ("self_led_strip_meteor", "fewshot_led_meteor", '{"success":true,"mode":"meteor","gpio":9}'),
+        ]
+        available_led_effect_tools = [
+            item for item in led_effect_tools if item[0] in tool_names
+        ][:3]
+        if len(available_led_effect_tools) >= 2:
+            self.dialogue.put(
+                Message(
+                    role="user",
+                    content="随便给我来几个灯带效果",
+                    is_temporary=True,
+                )
+            )
+            self.dialogue.put(
+                Message(
+                    role="assistant",
+                    tool_calls=[
+                        {
+                            "id": tc_id,
+                            "function": {"arguments": "{}", "name": tool_name},
+                            "type": "function",
+                            "index": idx,
+                        }
+                        for idx, (tool_name, tc_id, _) in enumerate(
+                            available_led_effect_tools
+                        )
+                    ],
+                    is_temporary=True,
+                )
+            )
+            for tool_name, tc_id, result in available_led_effect_tools:
+                self.dialogue.put(
+                    Message(
+                        role="tool",
+                        tool_call_id=tc_id,
+                        content=result,
+                        is_temporary=True,
+                    )
+                )
+            self.dialogue.put(
+                Message(
+                    role="assistant",
+                    content="给你切了几个灯带效果，看看哪个最顺眼~",
+                    is_temporary=True,
+                )
+            )
 
         self.logger.bind(tag=TAG).debug("已注入工具调用 few-shot 示例")
 
