@@ -84,7 +84,13 @@ def setup_logging():
         logger.remove()
 
         # 输出到控制台
-        logger.add(sys.stdout, format=log_format, level=log_level, filter=formatter)
+        logger.add(
+            sys.stdout,
+            format=log_format,
+            level=log_level,
+            filter=formatter,
+            enqueue=True,
+        )
 
         # 输出到文件 - 统一目录，按大小轮转
         # 日志文件完整路径
