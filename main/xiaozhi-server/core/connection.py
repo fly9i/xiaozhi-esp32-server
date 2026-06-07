@@ -1071,6 +1071,50 @@ class ConnectionHandler:
 
         return calls
 
+    def _normalize_text_tool_calls(self, raw_tool_call: Any) -> list[dict[str, Any]]:
+        """兼容文本工具调用中的单对象、数组和 OpenAI tool_calls 形态。"""
+        if isinstance(raw_tool_call, dict) and isinstance(
+                raw_tool_call.get("tool_calls"), list
+        ):
+            candidates = raw_tool_call["tool_calls"]
+        elif isinstance(raw_tool_call, list):
+            candidates = raw_tool_call
+        else:
+            candidates = [raw_tool_call]
+
+        normalized_calls: list[dict[str, Any]] = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+
+            function_data = item.get("function")
+            if not isinstance(function_data, dict):
+                function_data = {}
+
+            name = item.get("name") or function_data.get("name")
+            if not name:
+                continue
+
+            arguments = (
+                item["arguments"]
+                if "arguments" in item
+                else function_data.get("arguments", {})
+            )
+            if isinstance(arguments, str):
+                arguments_text = arguments or "{}"
+            else:
+                arguments_text = json.dumps(arguments or {}, ensure_ascii=False)
+
+            normalized_calls.append(
+                {
+                    "id": item.get("id") or str(uuid.uuid4().hex),
+                    "name": name,
+                    "arguments": arguments_text,
+                }
+            )
+
+        return normalized_calls
+
     def change_system_prompt(self, prompt):
         self.prompt = prompt
         # 更新系统prompt至上下文
@@ -1327,16 +1371,11 @@ class ConnectionHandler:
                 if a is not None:
                     try:
                         content_arguments_json = json.loads(a)
-                        tool_calls_list.append(
-                            {
-                                "id": str(uuid.uuid4().hex),
-                                "name": content_arguments_json["name"],
-                                "arguments": json.dumps(
-                                    content_arguments_json["arguments"],
-                                    ensure_ascii=False,
-                                ),
-                            }
+                        tool_calls_list.extend(
+                            self._normalize_text_tool_calls(content_arguments_json)
                         )
+                        if not tool_calls_list:
+                            raise ValueError("未解析到有效工具调用")
                     except Exception as e:
                         bHasError = True
                         response_message.append(a)

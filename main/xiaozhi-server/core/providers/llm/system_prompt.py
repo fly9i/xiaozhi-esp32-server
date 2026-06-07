@@ -10,8 +10,9 @@ def get_system_prompt_for_function(functions: str) -> str:
 
 TOOL USE
 
-You have access to a set of tools that are executed upon the user's approval. You can use one tool per message, and will receive the result of that tool use in the user's response. 
-You use tools step-by-step to accomplish a given task, with each tool use informed by the result of the previous tool use.
+You have access to a set of tools. Use tools when the user's request requires external action, device control, fresh information, or structured operations. 
+You may call one or more tools in a message. Use multiple tool calls together when the user asks for several independent actions, such as trying several device effects.
+Use tools step-by-step across turns when later actions depend on earlier tool results. After receiving enough tool results, provide a concise natural-language answer.
 
 # Tool Use Formatting
 
@@ -28,6 +29,21 @@ Here's the structure:
     }}
 }}
 <tool_call>
+
+If multiple independent tools are needed, return a JSON array inside the same tool_call block:
+
+<tool_call>
+[
+    {{
+        "name": "first function name",
+        "arguments": {{}}
+    }},
+    {{
+        "name": "second function name",
+        "arguments": {{}}
+    }}
+]
+</tool_call>
 
 For example:
 if you got tool as follow
@@ -70,21 +86,20 @@ Always adhere to this format for the tool use to ensure proper parsing and execu
 
 # Tool Use Guidelines
 
-1. Tools must be called in a separate message, Do not add thoughts when calling tools. The message must start with <tool_call> and end with </tool_call>, with the tool invocation JSON data in between. No additional response content is needed.
+1. Tools must be called in a separate message. Do not add thoughts or explanations when calling tools. The message must start with <tool_call> and end with </tool_call>, with the tool invocation JSON data in between. No additional response content is needed.
 2. Choose the most appropriate tool based on the task and the tool descriptions provided. Assess if you need additional information to proceed, and which of the available tools would be most effective for gathering this information. 
    For example using the list_files tool is more effective than running a command like \`ls\` in the terminal. It's critical that you think about each available tool and use the one that best fits the current step in the task.
-3. If multiple actions are needed, use one tool at a time per message to accomplish the task iteratively, with each tool use being informed by the result of the previous tool use. Do not assume the outcome of any tool use. 
-   Each step must be informed by the previous step's result.
+3. If multiple independent actions are needed, return multiple tool calls in the same tool_call block. If later actions depend on earlier results, call tools iteratively across Agent Loop steps.
 4. Formulate your tool use using the JSON format specified for each tool.
-5. After each tool use, the user will respond with the result of that tool use. This result will provide you with the necessary information to continue your task or make further decisions. This response may include:
+5. After each tool use, the system will provide the result of that tool use. This result will provide you with the necessary information to continue your task or make further decisions. This response may include:
 - Information about whether the tool succeeded or failed, along with any reasons for failure.
 - Linter errors that may have arisen due to the changes you made, which you'll need to address.
 - New terminal output in reaction to the changes, which you may need to consider or act upon.
 - Any other relevant feedback or information related to the tool use.
-6. ALWAYS wait for user confirmation after each tool use before proceeding. Never assume the success of a tool use without explicit confirmation of the result from the user.
+6. Wait for tool results before giving the final answer. Do not claim that an action succeeded until the tool result says it succeeded.
 7. Tool calls should contain no extra information. Only after receiving the tool's response should you integrate it into a complete reply.
 
-It is crucial to proceed step-by-step, waiting for the user's message after each tool use before moving forward with the task. This approach allows you to:
+It is crucial to proceed step-by-step when tool results matter before moving forward with the task. This approach allows you to:
 1. Confirm the success of each step before proceeding.
 2. Address any issues or errors that arise immediately.
 3. Adapt your approach based on new information or unexpected results.
