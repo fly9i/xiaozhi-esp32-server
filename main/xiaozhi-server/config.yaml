@@ -712,6 +712,28 @@ LLM:
     model_name: deepseek-r1-distill-llama-8b@q4_k_m # 使用的模型名称，需要预先在社区下载
     url: http://localhost:1234/v1 # LM Studio服务地址
     api_key: lm-studio # LM Studio服务的固定API Key
+  LlamaCppLLM:
+    # 本地 llama.cpp server，使用 OpenAI 兼容接口
+    type: openai
+    base_url: http://127.0.0.1:8080/v1
+    model_name: llama.cpp
+    api_key: llama.cpp
+    temperature: 0.7
+    max_tokens: 500
+    top_p: 0.8
+    frequency_penalty: 0
+    presence_penalty: 1.5
+    timeout:
+      pool: 2
+      connect: 5
+      write: 10
+      read: 120
+    extra_body:
+      top_k: 20
+      min_p: 0.0
+      repetition_penalty: 1.0
+      chat_template_kwargs:
+        enable_thinking: false
   HomeAssistant:
     # 定义LLM API类型
     type: homeassistant
@@ -743,6 +765,21 @@ LLM:
     base_url: http://localhost:9997  # Xinference服务地址
 # VLLM配置（视觉语言大模型）
 VLLM:
+  LlamaCppVLLM:
+    type: openai
+    base_url: http://127.0.0.1:8080/v1
+    model_name: llama.cpp
+    api_key: llama.cpp
+    temperature: 0.7
+    max_tokens: 500
+    top_p: 0.8
+    presence_penalty: 1.5
+    extra_body:
+      top_k: 20
+      min_p: 0.0
+      repetition_penalty: 1.0
+      chat_template_kwargs:
+        enable_thinking: false
   ChatGLMVLLM:
     type: openai
     # glm-4v-flash是智谱免费AI的视觉模型，需要先在智谱AI平台创建API密钥并获取api_key
