@@ -919,6 +919,93 @@ class ConnectionHandler:
         if hasattr(self, "loop") and self.loop:
             asyncio.run_coroutine_threadsafe(self.func_handler._initialize(), self.loop)
 
+    def _route_device_control_tools(self, query: str | None) -> list[dict[str, Any]]:
+        """对明确设备控制命令做确定性路由，避免小模型只口头承诺不调工具。"""
+        if not query or not hasattr(self, "func_handler") or self.func_handler is None:
+            return []
+
+        text = query.strip().lower()
+        if not text:
+            return []
+
+        def has_tool(name: str) -> bool:
+            return self.func_handler.has_tool(name)
+
+        def tool_call(name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+            return {
+                "id": str(uuid.uuid4().hex),
+                "name": name,
+                "arguments": json.dumps(arguments or {}, ensure_ascii=False),
+            }
+
+        color_map = {
+            "红": {"red": 255, "green": 0, "blue": 0},
+            "绿": {"red": 0, "green": 255, "blue": 0},
+            "蓝": {"red": 0, "green": 0, "blue": 255},
+            "黄": {"red": 255, "green": 220, "blue": 0},
+            "橙": {"red": 255, "green": 128, "blue": 0},
+            "紫": {"red": 160, "green": 64, "blue": 255},
+            "粉": {"red": 255, "green": 96, "blue": 180},
+            "白": {"red": 255, "green": 255, "blue": 255},
+            "黑": {"red": 0, "green": 0, "blue": 0},
+        }
+
+        def parse_color() -> dict[str, int] | None:
+            for key, rgb in color_map.items():
+                if key in text:
+                    return dict(rgb)
+            return None
+
+        calls: list[dict[str, Any]] = []
+        led_effects = [
+            ("霓虹", "self_led_strip_neon", {}),
+            ("neon", "self_led_strip_neon", {}),
+            ("极光", "self_led_strip_aurora", {}),
+            ("aurora", "self_led_strip_aurora", {}),
+            ("彩虹", "self_led_strip_rainbow", {}),
+            ("rainbow", "self_led_strip_rainbow", {}),
+            ("跑马", "self_led_strip_chase", {}),
+            ("走马", "self_led_strip_chase", {}),
+            ("chase", "self_led_strip_chase", {}),
+            ("呼吸", "self_led_strip_breath", {}),
+            ("breath", "self_led_strip_breath", {}),
+            ("彗星", "self_led_strip_comet", {}),
+            ("comet", "self_led_strip_comet", {}),
+            ("流星", "self_led_strip_meteor", {}),
+            ("meteor", "self_led_strip_meteor", {}),
+            ("剧场", "self_led_strip_theater", {}),
+            ("theater", "self_led_strip_theater", {}),
+        ]
+
+        is_led_request = "灯带" in text or "灯条" in text or "led" in text
+        if is_led_request and any(word in text for word in ("关", "关闭", "关掉", "熄灭", "清空", "停")):
+            if has_tool("self_led_strip_clear"):
+                calls.append(tool_call("self_led_strip_clear"))
+                return calls
+
+        for keyword, name, arguments in led_effects:
+            if keyword in text and has_tool(name):
+                calls.append(tool_call(name, arguments))
+                return calls
+
+        color = parse_color()
+        if color:
+            if is_led_request and has_tool("self_led_strip_set_color"):
+                led_args = dict(color)
+                led_args["brightness"] = 32
+                calls.append(tool_call("self_led_strip_set_color", led_args))
+                return calls
+
+            wants_background = "背景" in text or "底色" in text or "屏幕" in text
+            wants_expression = "表情" in text or "眼睛" in text or "嘴" in text
+
+            if wants_background and has_tool("self_screen_set_background_color"):
+                calls.append(tool_call("self_screen_set_background_color", color))
+            if wants_expression and has_tool("self_screen_set_expression_color"):
+                calls.append(tool_call("self_screen_set_expression_color", color))
+
+        return calls
+
     def change_system_prompt(self, prompt):
         self.prompt = prompt
         # 更新系统prompt至上下文
@@ -943,6 +1030,66 @@ class ConnectionHandler:
                     content_type=ContentType.ACTION,
                 )
             )
+            routed_tool_calls = self._route_device_control_tools(query)
+            if routed_tool_calls:
+                self.logger.bind(tag=TAG).info(
+                    f"命中设备控制直通工具: {[call['name'] for call in routed_tool_calls]}"
+                )
+                tool_call_timeout = int(self.config.get("tool_call_timeout", 30))
+                tool_results = []
+                for tool_call_data in routed_tool_calls:
+                    tool_input = json.loads(tool_call_data.get("arguments") or "{}")
+                    enqueue_tool_report(self, tool_call_data["name"], tool_input)
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.func_handler.handle_llm_function_call(self, tool_call_data),
+                        self.loop,
+                    )
+                    try:
+                        result = future.result(timeout=tool_call_timeout)
+                        tool_results.append((result, tool_call_data))
+                        self.logger.bind(tag=TAG).info(
+                            f"工具调用完成: name={tool_call_data['name']}, action={getattr(result.action, 'name', result.action)}, "
+                            f"result={_short_log(result.result)}, response={_short_log(result.response)}"
+                        )
+                        enqueue_tool_report(
+                            self,
+                            tool_call_data["name"],
+                            tool_input,
+                            str(result.result) if result.result else None,
+                            report_tool_call=False,
+                        )
+                    except Exception as e:
+                        self.logger.bind(tag=TAG).error(
+                            f"工具调用超时或异常: {tool_call_data['name']}, 错误: {e}"
+                        )
+                        tool_results.append(
+                            (
+                                ActionResponse(
+                                    action=Action.ERROR,
+                                    result="工具调用失败，请稍后再试。",
+                                ),
+                                tool_call_data,
+                            )
+                        )
+                        enqueue_tool_report(
+                            self,
+                            tool_call_data["name"],
+                            tool_input,
+                            str(e),
+                            report_tool_call=False,
+                        )
+
+                if tool_results:
+                    self._handle_function_result(tool_results, depth=depth)
+
+                self.tts.tts_text_queue.put(
+                    TTSMessageDTO(
+                        sentence_id=current_sentence_id,
+                        sentence_type=SentenceType.LAST,
+                        content_type=ContentType.ACTION,
+                    )
+                )
+                return True
         else:
             # 递归调用时，使用当前的sentence_id
             current_sentence_id = self.sentence_id
