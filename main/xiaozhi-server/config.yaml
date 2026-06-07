@@ -487,8 +487,8 @@ ASR:
     access_key_secret: 你的阿里云账号access_key_secret
     # 服务器地域选择，可选择距离更近的服务器以减少延迟，如nls-gateway-cn-hangzhou.aliyuncs.com(杭州)等
     host: nls-gateway-cn-shanghai.aliyuncs.com
-    # 断句检测时间(毫秒)，控制静音多长时间后进行断句，默认800毫秒
-    max_sentence_silence: 800
+    # 断句检测时间(毫秒)，控制静音多长时间后进行断句，默认1200毫秒
+    max_sentence_silence: 1200
     output_dir: tmp/
   BaiduASR:
     # 获取AppID、API Key、Secret Key：https://console.bce.baidu.com/ai-engine/old/#/ai/speech/app/list
@@ -593,7 +593,7 @@ ASR:
     # 可选参数
     disfluency_removal_enabled: false  # 是否过滤语气词(如"嗯"、"啊"等)
     semantic_punctuation_enabled: false  # 语义断句(true:会议场景,准确;false:VAD断句,交互场景,低延迟)
-    max_sentence_silence: 200  # VAD断句静音时长阈值(ms)，范围200-6000，仅VAD断句时生效
+    max_sentence_silence: 1200  # VAD断句静音时长阈值(ms)，范围200-6000，仅VAD断句时生效
     multi_threshold_mode_enabled: false  # 防止VAD断句切割过长，仅VAD断句时生效
     punctuation_prediction_enabled: true  # 是否自动添加标点符号
     inverse_text_normalization_enabled: true  # 是否开启ITN(中文数字转阿拉伯数字)
@@ -607,7 +607,7 @@ VAD:
     threshold: 0.5
     threshold_low: 0.3
     model_dir: models/snakers4_silero-vad
-    min_silence_duration_ms: 200  # 如果说话停顿比较长，可以把这个值设置大一些
+    min_silence_duration_ms: 1200  # 如果说话停顿比较长，可以把这个值设置大一些
 
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例
