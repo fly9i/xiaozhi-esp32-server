@@ -92,6 +92,7 @@ FUNCTION_CALL_TOOL_GUIDANCE = """
 - 当前环境使用 OpenAI 原生 tool_calls。需要操作设备、灯带、屏幕、提醒、音乐、搜索等外部能力时，必须返回 tool_calls，不要只用文字声称已经完成。
 - 当用户要求“来几个”“多个”“依次试试”“都执行”“再来几个效果”等多个独立动作时，可以在同一个 assistant 消息里返回多个 tool_calls。
 - 多个 tool_calls 必须只包含真实可用工具；不要编造不存在的效果或工具。
+- 如果用户请求包含数量目标，例如“多条”“几个”“多个”“几种”“都试试”，必须持续检查目标是否满足；当前结果不足时不要最终回答，继续调用合适工具。
 - 如果用户要求设备动作，优先调用对应工具；不要用 direct_answer 替代工具调用。
 - 工具调用消息不要混入解释文本。工具结果返回后，再基于结果给用户简短说明。
 </tool_call_rules>
@@ -183,6 +184,7 @@ class ConnectionHandler:
 
         # llm相关变量
         self.dialogue = Dialogue()
+        self.current_agent_goal = None
 
         # tts相关变量
         self.sentence_id = None
@@ -1115,6 +1117,132 @@ class ConnectionHandler:
 
         return normalized_calls
 
+    def _infer_agent_goal(self, query: str | None) -> dict[str, Any] | None:
+        """从用户原始请求中识别通用数量目标。"""
+        if not query:
+            return None
+
+        text = query.strip().lower()
+        if not text:
+            return None
+
+        number_map = {
+            "两": 2,
+            "二": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+        }
+        min_required = None
+        digit_match = re.search(r"(\d+)\s*(条|个|则|篇|首|种|次)", text)
+        if digit_match:
+            min_required = int(digit_match.group(1))
+        else:
+            chinese_match = re.search(r"([两二三四五])\s*(条|个|则|篇|首|种|次)", text)
+            if chinese_match:
+                min_required = number_map.get(chinese_match.group(1))
+
+        multiple_keywords = (
+            "多条",
+            "多则",
+            "多篇",
+            "多个",
+            "多种",
+            "几条",
+            "几个",
+            "几则",
+            "几篇",
+            "几种",
+            "来几个",
+            "来几条",
+            "再来几个",
+            "都试",
+            "都执行",
+            "依次",
+            "轮流",
+        )
+        has_multiple_goal = any(keyword in text for keyword in multiple_keywords)
+        if min_required is None and not has_multiple_goal:
+            return None
+
+        return {
+            "original_query": query,
+            "min_required": max(2, min_required or 3),
+            "completed_units": 0,
+        }
+
+    def _estimate_tool_result_units(self, result: ActionResponse) -> int:
+        """粗略估算一个工具结果满足了多少个独立目标项。"""
+        text = result.result or result.response or ""
+        if not isinstance(text, str) or not text:
+            return 1
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return max(1, len(parsed))
+            if isinstance(parsed, dict):
+                for key in ("items", "results", "news", "effects"):
+                    value = parsed.get(key)
+                    if isinstance(value, list):
+                        return max(1, len(value))
+        except (TypeError, ValueError):
+            pass
+
+        count_candidates = [
+            len(re.findall(r"新闻标题\s*:", text)),
+            len(re.findall(r'"success"\s*:\s*true', text)),
+            len(re.findall(r"(?m)^\s*\d+[\.、]", text)),
+        ]
+        return max(1, max(count_candidates))
+
+    def _record_agent_tool_progress(
+            self, result: ActionResponse, tool_call_data: dict[str, Any]
+    ) -> None:
+        if not self.current_agent_goal:
+            return
+        if result.action == Action.ERROR:
+            return
+
+        units = self._estimate_tool_result_units(result)
+        self.current_agent_goal["completed_units"] += units
+        self.logger.bind(tag=TAG).info(
+            "Agent目标进度: "
+            f"{self.current_agent_goal['completed_units']}/"
+            f"{self.current_agent_goal['min_required']} "
+            f"via {tool_call_data.get('name')}"
+        )
+
+    def _build_agent_progress_prompt(self, depth: int) -> str | None:
+        if not self.current_agent_goal:
+            return None
+
+        completed_units = int(self.current_agent_goal.get("completed_units", 0))
+        min_required = int(self.current_agent_goal.get("min_required", 0))
+        if completed_units >= min_required:
+            return None
+
+        try:
+            max_agent_steps = int(self.config.get("max_agent_steps", 5))
+        except (TypeError, ValueError):
+            max_agent_steps = 5
+        if max_agent_steps < 1:
+            max_agent_steps = 5
+
+        next_step = depth + 2
+        if next_step >= max_agent_steps:
+            return None
+
+        return (
+            "[Agent状态]\n"
+            f"用户原始目标：{self.current_agent_goal['original_query']}\n"
+            f"当前已完成的独立结果数量：{completed_units}\n"
+            f"目标数量：至少 {min_required}\n"
+            "判断：目标尚未完成。下一轮不要最终回答；请继续调用合适工具来补足结果。"
+            "如果一个工具每次只返回一项，可以再次调用同类工具或选择其他可用工具。"
+            "只有达到目标数量、工具明确失败且无法继续、或下一轮已达到最大 Agent 步数时，才总结已有结果。"
+        )
+
     def change_system_prompt(self, prompt):
         self.prompt = prompt
         # 更新系统prompt至上下文
@@ -1129,6 +1257,13 @@ class ConnectionHandler:
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
+            self.current_agent_goal = self._infer_agent_goal(query)
+            if self.current_agent_goal:
+                self.logger.bind(tag=TAG).info(
+                    "识别到Agent数量目标: "
+                    f"{self.current_agent_goal['min_required']}, "
+                    f"query={_short_log(query)}"
+                )
             current_sentence_id = str(uuid.uuid4().hex)
             self.sentence_id = current_sentence_id  # 更新共享属性
             self.dialogue.put(Message(role="user", content=query))
@@ -1528,6 +1663,7 @@ class ConnectionHandler:
         record_tools = []
 
         for result, tool_call_data in tool_results:
+            self._record_agent_tool_progress(result, tool_call_data)
             if result.action in [
                 Action.RESPONSE,
                 Action.NOTFOUND,
@@ -1629,7 +1765,20 @@ class ConnectionHandler:
                         )
                     )
 
-            self.chat(None, depth=depth + 1)
+            progress_prompt = self._build_agent_progress_prompt(depth)
+            progress_message = None
+            if progress_prompt:
+                progress_message = Message(role="user", content=progress_prompt)
+                self.dialogue.put(progress_message)
+                self.logger.bind(tag=TAG).info(
+                    f"Agent目标未完成，追加临时进度提示: {_short_log(progress_prompt)}"
+                )
+
+            try:
+                self.chat(None, depth=depth + 1)
+            finally:
+                if progress_message and progress_message in self.dialogue.dialogue:
+                    self.dialogue.dialogue.remove(progress_message)
 
     def _report_worker(self):
         """聊天记录上报工作线程"""
