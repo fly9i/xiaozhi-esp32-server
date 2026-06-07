@@ -122,8 +122,23 @@ async def main():
         "=============================================================\n"
     )
 
+    exit_task = asyncio.create_task(wait_for_exit())
+    service_tasks = {
+        exit_task: "退出信号",
+        ws_task: "WebSocket服务",
+        ota_task: "HTTP服务",
+    }
+
     try:
-        await wait_for_exit()  # 阻塞直到收到退出信号
+        done, _ = await asyncio.wait(
+            service_tasks.keys(),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            exc = task.exception()
+            if exc is not None:
+                logger.bind(tag=TAG).error("{}异常退出: {}", service_tasks[task], exc)
+                raise exc
     except asyncio.CancelledError:
         print("任务被取消，清理资源中...")
     finally:
@@ -131,6 +146,7 @@ async def main():
         await gc_manager.stop()
 
         # 取消所有任务（关键修复点）
+        exit_task.cancel()
         stdin_task.cancel()
         ws_task.cancel()
         if ota_task:
@@ -138,7 +154,9 @@ async def main():
 
         # 等待任务终止（必须加超时）
         await asyncio.wait(
-            [stdin_task, ws_task, ota_task] if ota_task else [stdin_task, ws_task],
+            [exit_task, stdin_task, ws_task, ota_task]
+            if ota_task
+            else [exit_task, stdin_task, ws_task],
             timeout=3.0,
             return_when=asyncio.ALL_COMPLETED,
         )
