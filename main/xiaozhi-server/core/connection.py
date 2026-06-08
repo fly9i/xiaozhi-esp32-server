@@ -995,6 +995,14 @@ class ConnectionHandler:
         if not text:
             return []
 
+        # 带时间节奏/序列意图的请求（每隔N秒、依次、轮流、保持X秒…）不走直通，
+        # 让 LLM 去调用 run_timed_sequence 按节奏执行，避免被一次性瞬间执行掉。
+        sequence_hints = ("每隔", "间隔", "依次", "轮流", "循环", "轮播", "保持", "停留")
+        if any(hint in text for hint in sequence_hints) or re.search(
+            r"(\d+|[两二三四五六七八九十])\s*秒", text
+        ):
+            return []
+
         def has_tool(name: str) -> bool:
             return self.func_handler.has_tool(name)
 
