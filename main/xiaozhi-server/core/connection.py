@@ -1750,7 +1750,6 @@ class ConnectionHandler:
                 content=streamed_text or None,
                 tool_calls=all_tool_calls,
             ))
-            streamed_text = ""
 
             for result, tool_call_data in record_tools:
                 text = result.result or ""
@@ -2012,10 +2011,10 @@ class ConnectionHandler:
     def chat_and_close(self, text):
         """Chat with the user and then close the connection"""
         try:
-            # Use the existing chat method
-            self.chat(text)
-
-            # After chat is complete, close the connection
+            result = self.chat(text)
+            if result is False:
+                self.logger.bind(tag=TAG).warning("chat_and_close: chat 被跳过（锁竞争），不关闭连接")
+                return
             self.close_after_chat = True
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"Chat and close error: {str(e)}")

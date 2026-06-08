@@ -152,10 +152,11 @@ class LLMProvider(LLMProviderBase):
                 continue
 
             if r == "tool":
+                tool_content = str(m.get("content", ""))
                 contents.append(
                     {
-                        "role": "model",
-                        "parts": [{"text": str(m.get("content", ""))}],
+                        "role": "user",
+                        "parts": [{"text": f"[工具返回] {tool_content}"}],
                     }
                 )
                 continue
