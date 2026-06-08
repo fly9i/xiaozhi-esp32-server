@@ -1050,10 +1050,20 @@ class ConnectionHandler:
                 calls.append(tool_call("self_led_strip_clear"))
                 return calls
 
+        # 收集一句话里出现的全部灯效关键词，按在文本中出现的先后顺序依次执行，
+        # 避免「先呼吸再霓虹」这类多效果请求只命中第一个就返回、漏掉后续效果。
+        matched_effects: list[tuple[int, str, dict[str, Any]]] = []
+        seen_effect_names: set[str] = set()
         for keyword, name, arguments in led_effects:
-            if keyword in text and has_tool(name):
+            position = text.find(keyword)
+            if position != -1 and name not in seen_effect_names and has_tool(name):
+                matched_effects.append((position, name, arguments))
+                seen_effect_names.add(name)
+        if matched_effects:
+            matched_effects.sort(key=lambda item: item[0])
+            for _, name, arguments in matched_effects:
                 calls.append(tool_call(name, arguments))
-                return calls
+            return calls
 
         color = parse_color()
         if color:
@@ -1280,7 +1290,9 @@ class ConnectionHandler:
                     f"命中设备控制直通工具: {[call['name'] for call in routed_tool_calls]}"
                 )
                 tool_call_timeout = int(self.config.get("tool_call_timeout", 30))
-                tool_results = []
+                # 先并发派发所有工具调用，再统一收集结果，
+                # 多效果时不必逐个串行等待（设备 MCP 调用本身很快）。
+                futures_with_data = []
                 for tool_call_data in routed_tool_calls:
                     tool_input = json.loads(tool_call_data.get("arguments") or "{}")
                     enqueue_tool_report(self, tool_call_data["name"], tool_input)
@@ -1288,6 +1300,10 @@ class ConnectionHandler:
                         self.func_handler.handle_llm_function_call(self, tool_call_data),
                         self.loop,
                     )
+                    futures_with_data.append((future, tool_call_data, tool_input))
+
+                tool_results = []
+                for future, tool_call_data, tool_input in futures_with_data:
                     try:
                         result = future.result(timeout=tool_call_timeout)
                         tool_results.append((result, tool_call_data))
@@ -1324,7 +1340,11 @@ class ConnectionHandler:
                         )
 
                 if tool_results:
-                    self._handle_function_result(tool_results, depth=depth)
+                    # 纯设备控制直通：用确定性确认语直接口播并写入对话历史，
+                    # 不再触发 REQLLM 递归，省掉一次纯为"说句话"的 LLM 往返与停顿。
+                    self._handle_device_control_result(
+                        tool_results, current_sentence_id
+                    )
 
                 self.tts.tts_text_queue.put(
                     TTSMessageDTO(
@@ -1657,6 +1677,87 @@ class ConnectionHandler:
             )
 
         return True
+
+    # 设备控制工具名 → 口播用的中文名称
+    _DEVICE_CONTROL_LABELS = {
+        "self_led_strip_neon": "霓虹",
+        "self_led_strip_aurora": "极光",
+        "self_led_strip_rainbow": "彩虹",
+        "self_led_strip_chase": "跑马灯",
+        "self_led_strip_breath": "呼吸灯",
+        "self_led_strip_comet": "彗星",
+        "self_led_strip_meteor": "流星",
+        "self_led_strip_theater": "剧场",
+        "self_led_strip_set_color": "灯带颜色",
+        "self_screen_set_background_color": "屏幕背景色",
+        "self_screen_set_expression_color": "表情颜色",
+    }
+
+    def _build_device_control_confirmation(
+            self, tool_results: list[tuple[ActionResponse, dict[str, Any]]]
+    ) -> str:
+        """根据已执行的设备控制工具拼出一句确定性确认语，避免再调 LLM。"""
+        errors = [r for r, _ in tool_results if r.action == Action.ERROR]
+        if errors:
+            return errors[0].result or "哎呀，刚才那个操作没成功，再试一次好吗？"
+
+        if any(tc["name"] == "self_led_strip_clear" for _, tc in tool_results):
+            return "好的，已经帮你把灯带关掉啦～"
+
+        labels: list[str] = []
+        for _, tool_call_data in tool_results:
+            label = self._DEVICE_CONTROL_LABELS.get(tool_call_data["name"])
+            if label and label not in labels:
+                labels.append(label)
+
+        if not labels:
+            return "好的，已经帮你设置好啦～"
+        return "好的，已经帮你切换到" + "、".join(labels) + "啦～"
+
+    def _handle_device_control_result(
+            self,
+            tool_results: list[tuple[ActionResponse, dict[str, Any]]],
+            sentence_id: str,
+    ) -> None:
+        """设备控制直通结果处理：写入标准工具调用链 + 直接口播确认语，不走 REQLLM。"""
+        # 写入 assistant(tool_calls) → tool(result) 链路，保证后续轮次能感知设备状态
+        all_tool_calls = [
+            {
+                "id": tool_call_data["id"],
+                "function": {
+                    "arguments": (
+                        "{}"
+                        if tool_call_data["arguments"] == ""
+                        else tool_call_data["arguments"]
+                    ),
+                    "name": tool_call_data["name"],
+                },
+                "type": "function",
+                "index": idx,
+            }
+            for idx, (_, tool_call_data) in enumerate(tool_results)
+        ]
+        self.dialogue.put(Message(role="assistant", tool_calls=all_tool_calls))
+        for result, tool_call_data in tool_results:
+            self.dialogue.put(
+                Message(
+                    role="tool",
+                    tool_call_id=(
+                        str(uuid.uuid4())
+                        if tool_call_data["id"] is None
+                        else tool_call_data["id"]
+                    ),
+                    content=result.result or "",
+                )
+            )
+
+        confirmation = self._build_device_control_confirmation(tool_results)
+        self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=confirmation)
+        self.tts.store_tts_text(sentence_id, confirmation)
+        self.dialogue.put(Message(role="assistant", content=confirmation))
+        self.logger.bind(tag=TAG).info(
+            f"设备控制直通确认: {_short_log(confirmation)}"
+        )
 
     def _handle_function_result(self, tool_results, depth, streamed_text=""):
         need_llm_tools = []
