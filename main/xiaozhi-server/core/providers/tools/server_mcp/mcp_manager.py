@@ -7,7 +7,7 @@ from typing import Dict, Any, List
 
 from mcp.types import LoggingMessageNotificationParams
 
-from config.config_loader import get_project_dir
+from config.config_loader import get_project_dir, expand_env_vars
 from config.logger import setup_logging
 from .mcp_client import ServerMCPClient
 
@@ -39,7 +39,8 @@ class ServerMCPManager:
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
-            return config.get("mcpServers", {})
+            # 递归展开 ${ENV_VAR}，支持把密钥放到环境变量而非写死在配置里
+            return expand_env_vars(config.get("mcpServers", {}))
         except Exception as e:
             logger.bind(tag=TAG).error(
                 f"Error loading MCP config from {self.config_path}: {e}"
