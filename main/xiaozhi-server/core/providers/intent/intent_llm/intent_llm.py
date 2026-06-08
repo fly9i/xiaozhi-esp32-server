@@ -10,6 +10,7 @@ import re
 import json
 import hashlib
 import time
+import asyncio
 
 
 
@@ -21,7 +22,7 @@ class IntentProvider(IntentProviderBase):
     def __init__(self, config):
         super().__init__(config)
         self.llm = None
-        self.promot = ""
+        self.prompt = ""
         # 导入全局缓存管理器
         from core.utils.cache.manager import cache_manager, CacheType
 
@@ -147,8 +148,12 @@ class IntentProvider(IntentProviderBase):
         model_info = getattr(self.llm, "model_name", str(self.llm.__class__.__name__))
         logger.bind(tag=TAG).debug(f"使用意图识别模型: {model_info}")
 
-        # 计算缓存键
-        cache_key = hashlib.md5((conn.device_id + text).encode()).hexdigest()
+        # 计算缓存键（包含最近对话上下文，避免多轮误命中）
+        context_hash = "".join(
+            f"{m.role}:{(m.content or '')[:20]};"
+            for m in (dialogue_history[-2:] if dialogue_history else [])
+        )
+        cache_key = hashlib.md5((conn.device_id + text + context_hash).encode()).hexdigest()
 
         # 检查缓存
         cached_intent = self.cache_manager.get(self.CacheType.INTENT, cache_key)
@@ -159,7 +164,7 @@ class IntentProvider(IntentProviderBase):
             )
             return cached_intent
 
-        if self.promot == "":
+        if self.prompt == "":
             functions = conn.func_handler.get_functions()
             if hasattr(conn, "mcp_client"):
                 mcp_tools = conn.mcp_client.get_available_tools()
@@ -168,11 +173,11 @@ class IntentProvider(IntentProviderBase):
                         functions = []
                     functions.extend(mcp_tools)
 
-            self.promot = self.get_intent_system_prompt(functions)
+            self.prompt = self.get_intent_system_prompt(functions)
 
         music_config = initialize_music_handler(conn)
         music_file_names = music_config["music_file_names"]
-        prompt_music = f"{self.promot}\n<musicNames>{music_file_names}\n</musicNames>"
+        prompt_music = f"{self.prompt}\n<musicNames>{music_file_names}\n</musicNames>"
 
         home_assistant_cfg = conn.config["plugins"].get("home_assistant")
         if home_assistant_cfg:
@@ -207,8 +212,10 @@ class IntentProvider(IntentProviderBase):
         logger.bind(tag=TAG).debug(f"开始LLM意图识别调用, 模型: {model_info}")
 
         try:
-            intent = self.llm.response_no_stream(
-                system_prompt=prompt_music, user_prompt=user_prompt
+            intent = await asyncio.to_thread(
+                self.llm.response_no_stream,
+                system_prompt=prompt_music,
+                user_prompt=user_prompt,
             )
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in intent detection LLM call: {e}")
@@ -258,12 +265,13 @@ class IntentProvider(IntentProviderBase):
                     )
 
                 elif function_name == "continue_chat":
-                    # 处理普通对话
-                    # 保留非工具相关的消息
+                    # 同时清理 tool 消息和带 tool_calls 的 assistant 消息
+                    # 避免"悬空 tool_calls"导致后续注入假消息
                     clean_history = [
                         msg
                         for msg in conn.dialogue.dialogue
-                        if msg.role not in ["tool", "function"]
+                        if msg.role not in ("tool", "function")
+                        and not (msg.role == "assistant" and msg.tool_calls)
                     ]
                     conn.dialogue.dialogue = clean_history
 

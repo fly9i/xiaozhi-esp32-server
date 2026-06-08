@@ -29,7 +29,7 @@ Here's the structure:
         // Add more parameters as needed, if parameters are required, you must provide them
     }}
 }}
-<tool_call>
+</tool_call>
 
 If multiple independent tools are needed, return a JSON array inside the same tool_call block:
 

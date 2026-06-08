@@ -133,20 +133,20 @@ class LLMProvider(LLMProviderBase):
             r = m["role"]
 
             if r == "assistant" and "tool_calls" in m:
-                tc = m["tool_calls"][0]
-                contents.append(
-                    {
-                        "role": "model",
-                        "parts": [
-                            {
-                                "function_call": {
-                                    "name": tc["function"]["name"],
-                                    "args": json.loads(tc["function"]["arguments"]),
-                                }
-                            }
-                        ],
-                    }
-                )
+                parts = []
+                for tc in m["tool_calls"]:
+                    args_str = tc["function"].get("arguments", "{}")
+                    try:
+                        args = json.loads(args_str) if args_str else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                    parts.append({
+                        "function_call": {
+                            "name": tc["function"]["name"],
+                            "args": args,
+                        }
+                    })
+                contents.append({"role": "model", "parts": parts})
                 continue
 
             if r == "tool":

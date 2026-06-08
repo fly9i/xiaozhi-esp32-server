@@ -34,6 +34,10 @@ async def connect_mcp_endpoint(mcp_endpoint_url: str, conn=None) -> MCPEndpointC
         # 获取工具列表
         await send_mcp_endpoint_tools_list(mcp_client)
 
+        # 等待工具列表就绪
+        if not await mcp_client.wait_ready(timeout=10):
+            logger.bind(tag=TAG).warning("MCP接入点工具列表获取超时（10s），继续等待")
+
         logger.bind(tag=TAG).info("MCP接入点连接成功")
         return mcp_client
 

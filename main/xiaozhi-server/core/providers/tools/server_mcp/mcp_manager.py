@@ -162,6 +162,18 @@ class ServerMCPManager:
                         logger.bind(tag=TAG).info(
                             f"成功重新连接 MCP 客户端: {client_name}"
                         )
+
+                        # 刷新工具列表
+                        self.tools = []
+                        for c in self.clients.values():
+                            self.tools.extend(c.get_available_tools())
+
+                        if (
+                            hasattr(self.conn, "func_handler")
+                            and self.conn.func_handler
+                            and hasattr(self.conn.func_handler, "tool_manager")
+                        ):
+                            self.conn.func_handler.tool_manager.refresh_tools()
                     else:
                         logger.bind(tag=TAG).error(
                             f"Cannot reconnect MCP client {client_name}: config not found"

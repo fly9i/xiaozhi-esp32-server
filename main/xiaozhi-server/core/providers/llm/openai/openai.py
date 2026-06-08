@@ -159,6 +159,7 @@ class LLMProvider(LLMProviderBase):
         responses = self.client.chat.completions.create(**request_params)
 
         is_active = True
+        _think_buffer = ""
         try:            
             for chunk in responses:
                 try:
@@ -167,15 +168,31 @@ class LLMProvider(LLMProviderBase):
                 except IndexError:
                     content = ""
                 if content:
-                    if "<think>" in content:
-                        is_active = False
-                        content = content.split("<think>")[0]
-                    if "</think>" in content:
-                        is_active = True
-                        content = content.split("</think>")[-1]
-                    if is_active:
-                        yield content
+                    _think_buffer += content
+                    while _think_buffer:
+                        if not is_active:
+                            end = _think_buffer.find("</think>")
+                            if end == -1:
+                                keep = max(0, len(_think_buffer) - 8)
+                                _think_buffer = _think_buffer[keep:]
+                                break
+                            _think_buffer = _think_buffer[end + 8:]
+                            is_active = True
+                        else:
+                            start = _think_buffer.find("<think>")
+                            if start == -1:
+                                safe = max(0, len(_think_buffer) - 7)
+                                if safe:
+                                    yield _think_buffer[:safe]
+                                    _think_buffer = _think_buffer[safe:]
+                                break
+                            if start > 0:
+                                yield _think_buffer[:start]
+                            _think_buffer = _think_buffer[start + 7:]
+                            is_active = False
         finally:
+            if is_active and _think_buffer:
+                yield _think_buffer
             responses.close()
 
     def response_with_functions(self, session_id, dialogue, functions=None, **kwargs):

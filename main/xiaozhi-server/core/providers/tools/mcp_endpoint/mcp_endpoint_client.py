@@ -17,6 +17,7 @@ class MCPEndpointClient:
         self.tools = {}  # sanitized_name -> tool_data
         self.name_mapping = {}
         self.ready = False
+        self._ready_event = asyncio.Event()
         self.call_results = {}  # To store Futures for tool call responses
         self.next_id = 1
         self.lock = asyncio.Lock()
@@ -55,6 +56,17 @@ class MCPEndpointClient:
     async def set_ready(self, status: bool):
         async with self.lock:
             self.ready = status
+            if status:
+                self._ready_event.set()
+            else:
+                self._ready_event.clear()
+
+    async def wait_ready(self, timeout: float = 10.0) -> bool:
+        try:
+            await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     async def add_tool(self, tool_data: dict):
         async with self.lock:

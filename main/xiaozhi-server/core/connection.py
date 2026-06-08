@@ -140,6 +140,8 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
 
+        self._chat_lock = threading.Lock()
+
         # 线程任务相关
         self.loop = None  # 在 handle_connection 中获取运行中的事件循环
         self.stop_event = threading.Event()
@@ -1257,6 +1259,17 @@ class ConnectionHandler:
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
+            if not self._chat_lock.acquire(blocking=False):
+                self.logger.bind(tag=TAG).warning("上一次对话尚未结束，丢弃本次请求")
+                return False
+        try:
+            return self._chat_inner(query, depth, current_sentence_id)
+        finally:
+            if depth == 0:
+                self._chat_lock.release()
+
+    def _chat_inner(self, query, depth, current_sentence_id):
+        if depth == 0:
             self.current_agent_goal = self._infer_agent_goal(query)
             if self.current_agent_goal:
                 self.logger.bind(tag=TAG).info(
@@ -1346,6 +1359,7 @@ class ConnectionHandler:
             max_agent_steps = 5
         agent_step = depth + 1
         force_final_answer = False
+        max_steps_msg = None
         self.logger.bind(tag=TAG).info(
             f"Agent Loop step {agent_step}/{max_agent_steps}"
         )
@@ -1355,12 +1369,11 @@ class ConnectionHandler:
                 f"Agent Loop 已到第 {agent_step} 轮，禁用工具并直接生成最终回答"
             )
             force_final_answer = True
-            self.dialogue.put(
-                Message(
-                    role="user",
-                    content="[系统提示] Agent 已达到最大推理轮数。请基于目前已经获取的所有信息，直接给出最终回答。不要再尝试调用任何工具。",
-                )
+            max_steps_msg = Message(
+                role="user",
+                content="[系统提示] Agent 已达到最大推理轮数。请基于目前已经获取的所有信息，直接给出最终回答。不要再尝试调用任何工具。",
             )
+            self.dialogue.put(max_steps_msg)
 
         functions = None
         if (
@@ -1384,7 +1397,7 @@ class ConnectionHandler:
                 future = asyncio.run_coroutine_threadsafe(
                     self.memory.query_memory(query), self.loop
                 )
-                memory_str = future.result()
+                memory_str = future.result(timeout=30)
 
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
@@ -1417,10 +1430,11 @@ class ConnectionHandler:
                 if self.client_abort:
                     break
                 if self.intent_type == "function_call" and functions is not None:
-                    content, tools_call = response
-                    if "content" in response:
-                        content = response["content"]
-                        tools_call = None
+                    if isinstance(response, dict):
+                        content = response.get("content")
+                        tools_call = response.get("tool_calls")
+                    else:
+                        content, tools_call = response
                     if content is not None and len(content) > 0:
                         content_arguments += content
 
@@ -1579,7 +1593,6 @@ class ConnectionHandler:
                 if len(response_message) > 0:
                     streamed_text = "".join(response_message)
                     self.tts.store_tts_text(current_sentence_id, streamed_text)
-                    self.dialogue.put(Message(role="assistant", content=streamed_text))
                 response_message.clear()
 
                 # 收集所有工具调用的 Future
@@ -1641,6 +1654,10 @@ class ConnectionHandler:
             self.dialogue.put(Message(role="assistant", content=text_buff))
             self.logger.bind(tag=TAG).info(f"LLM最终回复: {_short_log(text_buff)}")
 
+        # 清理 max_steps 临时消息
+        if max_steps_msg and max_steps_msg in self.dialogue.dialogue:
+            self.dialogue.dialogue.remove(max_steps_msg)
+
         if depth == 0:
             self.tts.tts_text_queue.put(
                 TTSMessageDTO(
@@ -1659,6 +1676,22 @@ class ConnectionHandler:
         return True
 
     def _handle_function_result(self, tool_results, depth, streamed_text=""):
+        try:
+            self._handle_function_result_inner(tool_results, depth, streamed_text)
+        except Exception as e:
+            self.logger.bind(tag=TAG).error(f"处理工具结果异常: {e}", exc_info=True)
+            self.tts.tts_text_queue.put(
+                TTSMessageDTO(
+                    sentence_id=self.sentence_id,
+                    sentence_type=SentenceType.LAST,
+                    content_type=ContentType.ACTION,
+                )
+            )
+            error_msg = get_system_error_response(self.config)
+            self.dialogue.put(Message(role="assistant", content=error_msg))
+            self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=error_msg)
+
+    def _handle_function_result_inner(self, tool_results, depth, streamed_text=""):
         need_llm_tools = []
         record_tools = []
 
@@ -1685,10 +1718,8 @@ class ConnectionHandler:
             else:
                 pass
 
-        # Action.RECORD：写入完整工具调用链（assistant(tool_calls) → tool(result) → assistant(response)）
-        # 模型从历史中学到工具调用模式，不额外调用LLM
+        # Action.RECORD：写入完整工具调用链（assistant(content+tool_calls) → tool(result) → assistant(response)）
         if record_tools:
-            # 构造 assistant 消息（含 tool_calls），记录"模型调用了哪些工具"
             all_tool_calls = [
                 {
                     "id": tool_call_data["id"],
@@ -1705,9 +1736,13 @@ class ConnectionHandler:
                 }
                 for idx, (_, tool_call_data) in enumerate(record_tools)
             ]
-            self.dialogue.put(Message(role="assistant", tool_calls=all_tool_calls))
+            self.dialogue.put(Message(
+                role="assistant",
+                content=streamed_text or None,
+                tool_calls=all_tool_calls,
+            ))
+            streamed_text = ""
 
-            # 写入每条工具的执行结果，记录"工具返回了什么"
             for result, tool_call_data in record_tools:
                 text = result.result or ""
                 self.dialogue.put(
@@ -1715,14 +1750,13 @@ class ConnectionHandler:
                         role="tool",
                         tool_call_id=(
                             str(uuid.uuid4())
-                            if tool_call_data["id"] is None
+                            if not tool_call_data["id"]
                             else tool_call_data["id"]
                         ),
                         content=text,
                     )
                 )
 
-            # 用固定文本作为最终回复，补全标准三段式，保证下一条消息是 user 而非接 tool
             response_parts = []
             for result, _ in record_tools:
                 resp = result.response or result.result
@@ -1748,7 +1782,11 @@ class ConnectionHandler:
                 }
                 for idx, (_, tool_call_data) in enumerate(need_llm_tools)
             ]
-            self.dialogue.put(Message(role="assistant", tool_calls=all_tool_calls))
+            self.dialogue.put(Message(
+                role="assistant",
+                content=streamed_text or None,
+                tool_calls=all_tool_calls,
+            ))
 
             for result, tool_call_data in need_llm_tools:
                 text = result.result
@@ -1758,7 +1796,7 @@ class ConnectionHandler:
                             role="tool",
                             tool_call_id=(
                                 str(uuid.uuid4())
-                                if tool_call_data["id"] is None
+                                if not tool_call_data["id"]
                                 else tool_call_data["id"]
                             ),
                             content=text,
@@ -1768,7 +1806,7 @@ class ConnectionHandler:
             progress_prompt = self._build_agent_progress_prompt(depth)
             progress_message = None
             if progress_prompt:
-                progress_message = Message(role="user", content=progress_prompt)
+                progress_message = Message(role="user", content=progress_prompt, is_temporary=True)
                 self.dialogue.put(progress_message)
                 self.logger.bind(tag=TAG).info(
                     f"Agent目标未完成，追加临时进度提示: {_short_log(progress_prompt)}"
@@ -2077,7 +2115,7 @@ class ConnectionHandler:
                     tool_index = len(tool_calls_list) - 1 if tool_calls_list else 0
 
             # 确保列表有足够的位置
-            if tool_index >= len(tool_calls_list):
+            while tool_index >= len(tool_calls_list):
                 tool_calls_list.append({"id": "", "name": "", "arguments": ""})
 
             # 更新工具调用信息
