@@ -83,11 +83,10 @@ class DeviceIoTExecutor(ToolExecutor):
                             )
 
                     if "{value}" in response_success and control_params:
-                        value_source = (
-                            control_params.get("value")
-                            or control_params.get("brightness")
-                            or control_params.get("temperature")
-                            or next(iter(control_params.values()), "")
+                        value_source = next(
+                            (control_params[k] for k in ("value", "brightness", "temperature")
+                             if k in control_params and control_params[k] is not None),
+                            next(iter(control_params.values()), "")
                         )
                         response_success = response_success.replace("{value}", str(value_source))
 

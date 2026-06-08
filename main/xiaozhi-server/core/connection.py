@@ -1417,6 +1417,8 @@ class ConnectionHandler:
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {_short_log(query)}: {e}")
+            if max_steps_msg and max_steps_msg in self.dialogue.dialogue:
+                self.dialogue.dialogue.remove(max_steps_msg)
             return None
 
         # 处理流式响应
@@ -1510,6 +1512,8 @@ class ConnectionHandler:
                         content_type=ContentType.ACTION,
                     )
                 )
+            if max_steps_msg and max_steps_msg in self.dialogue.dialogue:
+                self.dialogue.dialogue.remove(max_steps_msg)
             return
         # 处理function call
         if tool_call_flag:
@@ -1579,6 +1583,8 @@ class ConnectionHandler:
                                     content_type=ContentType.ACTION,
                                 )
                             )
+                        if max_steps_msg and max_steps_msg in self.dialogue.dialogue:
+                            self.dialogue.dialogue.remove(max_steps_msg)
                         return
 
                     tool_calls_list = real_tool_calls
@@ -1680,16 +1686,19 @@ class ConnectionHandler:
             self._handle_function_result_inner(tool_results, depth, streamed_text)
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"处理工具结果异常: {e}", exc_info=True)
-            self.tts.tts_text_queue.put(
-                TTSMessageDTO(
-                    sentence_id=self.sentence_id,
-                    sentence_type=SentenceType.LAST,
-                    content_type=ContentType.ACTION,
+            if depth == 0:
+                self.tts.tts_text_queue.put(
+                    TTSMessageDTO(
+                        sentence_id=self.sentence_id,
+                        sentence_type=SentenceType.LAST,
+                        content_type=ContentType.ACTION,
+                    )
                 )
-            )
-            error_msg = get_system_error_response(self.config)
-            self.dialogue.put(Message(role="assistant", content=error_msg))
-            self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=error_msg)
+                error_msg = get_system_error_response(self.config)
+                self.dialogue.put(Message(role="assistant", content=error_msg))
+                self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=error_msg)
+            else:
+                raise
 
     def _handle_function_result_inner(self, tool_results, depth, streamed_text=""):
         need_llm_tools = []
@@ -1789,19 +1798,18 @@ class ConnectionHandler:
             ))
 
             for result, tool_call_data in need_llm_tools:
-                text = result.result
-                if text is not None and len(text) > 0:
-                    self.dialogue.put(
-                        Message(
-                            role="tool",
-                            tool_call_id=(
-                                str(uuid.uuid4())
-                                if not tool_call_data["id"]
-                                else tool_call_data["id"]
-                            ),
-                            content=text,
-                        )
+                text = result.result or ""
+                self.dialogue.put(
+                    Message(
+                        role="tool",
+                        tool_call_id=(
+                            str(uuid.uuid4())
+                            if not tool_call_data["id"]
+                            else tool_call_data["id"]
+                        ),
+                        content=text,
                     )
+                )
 
             progress_prompt = self._build_agent_progress_prompt(depth)
             progress_message = None
@@ -2107,12 +2115,13 @@ class ConnectionHandler:
         """
         for tool_call in tools_call:
             tool_index = getattr(tool_call, "index", None)
-            if tool_index is None:
+            if tool_index is None or tool_index < 0:
                 if tool_call.function.name:
-                    # 有 function_name，说明是新的工具调用
                     tool_index = len(tool_calls_list)
                 else:
                     tool_index = len(tool_calls_list) - 1 if tool_calls_list else 0
+            if tool_index < 0:
+                tool_index = 0
 
             # 确保列表有足够的位置
             while tool_index >= len(tool_calls_list):

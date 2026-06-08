@@ -1,6 +1,7 @@
 """服务端插件工具执行器"""
 
 import asyncio
+import inspect
 from typing import Dict, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -27,14 +28,23 @@ class ServerPluginExecutor(ToolExecutor):
             )
 
         try:
+            is_async = inspect.iscoroutinefunction(func_item.func)
             if hasattr(func_item, "type"):
                 func_type = func_item.type
-                if func_type.code in [4, 5, 3]:
+                needs_conn = func_type.code in [4, 5, 3]
+            else:
+                needs_conn = False
+
+            if is_async:
+                if needs_conn:
+                    result = await func_item.func(conn, **arguments)
+                else:
+                    result = await func_item.func(**arguments)
+            else:
+                if needs_conn:
                     result = await asyncio.to_thread(func_item.func, conn, **arguments)
                 else:
                     result = await asyncio.to_thread(func_item.func, **arguments)
-            else:
-                result = await asyncio.to_thread(func_item.func, **arguments)
 
             return result
 

@@ -285,10 +285,14 @@ class IntentProvider(IntentProviderBase):
             logger.bind(tag=TAG).debug(f"意图后处理耗时: {postprocess_time:.4f}秒")
             return intent
         except json.JSONDecodeError:
-            # 后处理时间
             postprocess_time = time.time() - postprocess_start_time
             logger.bind(tag=TAG).error(
                 f"无法解析意图JSON: {intent}, 后处理耗时: {postprocess_time:.4f}秒"
             )
-            # 如果解析失败，默认返回继续聊天意图
+            clean_history = [
+                msg for msg in conn.dialogue.dialogue
+                if msg.role not in ("tool", "function")
+                and not (msg.role == "assistant" and msg.tool_calls)
+            ]
+            conn.dialogue.dialogue = clean_history
             return '{"function_call": {"name": "continue_chat"}}'
