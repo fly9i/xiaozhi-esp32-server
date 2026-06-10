@@ -133,27 +133,30 @@ class LLMProvider(LLMProviderBase):
             r = m["role"]
 
             if r == "assistant" and "tool_calls" in m:
-                tc = m["tool_calls"][0]
-                contents.append(
-                    {
-                        "role": "model",
-                        "parts": [
-                            {
-                                "function_call": {
-                                    "name": tc["function"]["name"],
-                                    "args": json.loads(tc["function"]["arguments"]),
-                                }
-                            }
-                        ],
-                    }
-                )
+                parts = []
+                for tc in m["tool_calls"]:
+                    args_str = tc["function"].get("arguments", "{}")
+                    try:
+                        args = json.loads(args_str) if args_str else {}
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        args = {}
+                    if not isinstance(args, dict):
+                        args = {}
+                    parts.append({
+                        "function_call": {
+                            "name": tc["function"]["name"],
+                            "args": args,
+                        }
+                    })
+                contents.append({"role": "model", "parts": parts})
                 continue
 
             if r == "tool":
+                tool_content = str(m.get("content", ""))
                 contents.append(
                     {
-                        "role": "model",
-                        "parts": [{"text": str(m.get("content", ""))}],
+                        "role": "user",
+                        "parts": [{"text": f"[工具返回] {tool_content}"}],
                     }
                 )
                 continue
@@ -176,26 +179,27 @@ class LLMProvider(LLMProviderBase):
         try:
             for chunk in stream:
                 cand = chunk.candidates[0]
+                chunk_tool_calls = []
                 for part in cand.content.parts:
-                    # a) 函数调用-通常是最后一段话才是函数调用
                     if getattr(part, "function_call", None):
                         fc = part.function_call
-                        yield None, [
-                            SimpleNamespace(
-                                id=uuid.uuid4().hex,
-                                type="function",
-                                function=SimpleNamespace(
-                                    name=fc.name,
-                                    arguments=json.dumps(
-                                        dict(fc.args), ensure_ascii=False
-                                    ),
-                                ),
-                            )
-                        ]
-                        return
-                    # b) 普通文本
+                        try:
+                            args_dict = dict(fc.args) if fc.args else {}
+                        except (TypeError, ValueError):
+                            args_dict = {}
+                        chunk_tool_calls.append(SimpleNamespace(
+                            id=uuid.uuid4().hex,
+                            type="function",
+                            function=SimpleNamespace(
+                                name=fc.name,
+                                arguments=json.dumps(args_dict, ensure_ascii=False),
+                            ),
+                        ))
                     if getattr(part, "text", None):
                         yield part.text if tools is None else (part.text, None)
+                if chunk_tool_calls:
+                    yield None, chunk_tool_calls
+                    return
 
         finally:
             if tools is not None:

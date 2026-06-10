@@ -150,10 +150,13 @@ class ServerMCPManager:
                     f"重试前尝试重新连接 MCP 客户端 {client_name}"
                 )
                 try:
-                    # 关闭旧的连接
                     await target_client.cleanup()
+                    self.clients.pop(client_name, None)
+                except Exception as e:
+                    logger.bind(tag=TAG).warning(f"清理旧 MCP client 失败: {e}")
+                    self.clients.pop(client_name, None)
 
-                    # 重新初始化客户端
+                try:
                     config = self.load_config()
                     if client_name in config:
                         client = ServerMCPClient(config[client_name])
@@ -163,6 +166,18 @@ class ServerMCPManager:
                         logger.bind(tag=TAG).info(
                             f"成功重新连接 MCP 客户端: {client_name}"
                         )
+
+                        self.tools = []
+                        for c in self.clients.values():
+                            self.tools.extend(c.get_available_tools())
+
+                        if (
+                            hasattr(self.conn, "func_handler")
+                            and self.conn.func_handler
+                            and hasattr(self.conn.func_handler, "tool_manager")
+                        ):
+                            self.conn.func_handler.tool_manager.refresh_tools()
+                            self.conn.func_handler.current_support_functions()
                     else:
                         logger.bind(tag=TAG).error(
                             f"Cannot reconnect MCP client {client_name}: config not found"

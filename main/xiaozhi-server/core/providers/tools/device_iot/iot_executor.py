@@ -75,18 +75,20 @@ class DeviceIoTExecutor(ToolExecutor):
 
                     response_success = arguments.get("response_success", "操作成功")
 
-                    # 处理响应中的占位符
                     for param_name, param_value in control_params.items():
                         placeholder = "{" + param_name + "}"
                         if placeholder in response_success:
                             response_success = response_success.replace(
                                 placeholder, str(param_value)
                             )
-                        if "{value}" in response_success:
-                            response_success = response_success.replace(
-                                "{value}", str(param_value)
-                            )
-                            break
+
+                    if "{value}" in response_success and control_params:
+                        value_source = next(
+                            (control_params[k] for k in ("value", "brightness", "temperature")
+                             if k in control_params and control_params[k] is not None),
+                            next(iter(control_params.values()), "")
+                        )
+                        response_success = response_success.replace("{value}", str(value_source))
 
                     return ActionResponse(
                         action=Action.REQLLM,

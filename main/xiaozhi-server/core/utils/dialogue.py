@@ -33,19 +33,23 @@ class Dialogue:
 
     def getMessages(self, m, dialogue):
         if m.tool_calls is not None:
-            dialogue.append({"role": m.role, "tool_calls": m.tool_calls})
+            dialogue.append({
+                "role": m.role,
+                "content": m.content,
+                "tool_calls": m.tool_calls,
+            })
         elif m.role == "tool":
             dialogue.append(
                 {
                     "role": m.role,
                     "tool_call_id": (
-                        str(uuid.uuid4()) if m.tool_call_id is None else m.tool_call_id
+                        str(uuid.uuid4()) if not m.tool_call_id else m.tool_call_id
                     ),
-                    "content": m.content,
+                    "content": m.content if m.content is not None else "",
                 }
             )
         else:
-            dialogue.append({"role": m.role, "content": m.content})
+            dialogue.append({"role": m.role, "content": m.content if m.content is not None else ""})
 
     def get_llm_dialogue(self) -> List[Dict[str, str]]:
         # 直接调用get_llm_dialogue_with_memory，传入None作为memory_str
