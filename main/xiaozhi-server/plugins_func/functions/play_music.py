@@ -3,6 +3,7 @@ import re
 import time
 import random
 import difflib
+import asyncio
 import traceback
 from pathlib import Path
 from core.handle.sendAudioHandle import send_stt_message
@@ -51,9 +52,10 @@ def play_music(conn: "ConnectionHandler", song_name: str):
                 action=Action.RESPONSE, result="系统繁忙", response="请稍后再试"
             )
 
-        # 提交异步任务
-        task = conn.loop.create_task(
-            handle_music_command(conn, music_intent)  # 封装异步逻辑
+        # 提交异步任务。插件执行器在工作线程跑同步函数，
+        # 必须用线程安全的方式向事件循环提交协程。
+        task = asyncio.run_coroutine_threadsafe(
+            handle_music_command(conn, music_intent), conn.loop
         )
 
         # 非阻塞回调处理

@@ -127,15 +127,20 @@ def _normalize_steps(
 
 
 def _cancel_running_sequence(conn: "ConnectionHandler") -> None:
-    """取消上一个仍在运行的序列，保证同一时间只有一个序列在跑。"""
+    """取消上一个仍在运行的序列，保证同一时间只有一个序列在跑。
+
+    句柄可能是 Task（loop 线程启动）或 run_coroutine_threadsafe 返回的
+    Future（工作线程启动），两者的 cancel() 都是线程安全可用的。
+    """
     task = getattr(conn, "_timed_sequence_task", None)
     if task is not None and not task.done():
         task.cancel()
     conn._timed_sequence_task = None
+    conn._timed_sequence_token = None
 
 
 async def _run_sequence(
-    conn: "ConnectionHandler", steps: list[dict[str, Any]]
+    conn: "ConnectionHandler", steps: list[dict[str, Any]], token: object
 ) -> None:
     """后台协程：逐步派发工具调用，并在步骤之间按 hold_sec 等待。"""
     try:
@@ -173,8 +178,11 @@ async def _run_sequence(
         logger.bind(tag=TAG).info("定时序列任务被取消")
         raise
     finally:
-        if getattr(conn, "_timed_sequence_task", None) is asyncio.current_task():
+        # 用 token 而非 task 身份判断：注册函数可能在工作线程里用
+        # run_coroutine_threadsafe 启动序列，存的是 Future 而非 Task。
+        if getattr(conn, "_timed_sequence_token", None) is token:
             conn._timed_sequence_task = None
+            conn._timed_sequence_token = None
 
 
 @register_function(
@@ -210,8 +218,20 @@ def run_timed_sequence(
     # 同一时间只允许一个序列运行，先取消上一个
     _cancel_running_sequence(conn)
 
-    task = conn.loop.create_task(_run_sequence(conn, normalized))
-    conn._timed_sequence_task = task
+    # 插件执行器用 asyncio.to_thread 跑同步函数，这里通常在工作线程，
+    # 不能直接 conn.loop.create_task（非线程安全）；只有恰好在 loop 线程时才可以。
+    token = object()
+    coro = _run_sequence(conn, normalized, token)
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+    if running_loop is conn.loop:
+        handle = conn.loop.create_task(coro)
+    else:
+        handle = asyncio.run_coroutine_threadsafe(coro, conn.loop)
+    conn._timed_sequence_task = handle
+    conn._timed_sequence_token = token
 
     total = round(sum(step["hold_sec"] for step in normalized))
     logger.bind(tag=TAG).info(
