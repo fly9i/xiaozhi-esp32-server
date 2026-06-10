@@ -1,7 +1,9 @@
 import os
+import re
 import asyncio
 import yaml
 from collections.abc import Mapping
+from loguru import logger
 from config.manage_api_client import (
     init_service,
     get_server_config,
@@ -10,6 +12,8 @@ from config.manage_api_client import (
     DeviceNotFoundException,
     DeviceBindException,
 )
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{(\w+)\}")
 
 
 def get_project_dir():
@@ -24,9 +28,23 @@ def read_config(config_path):
 
 
 def expand_env_vars(value: object) -> object:
-    """递归展开配置中的 ${ENV_VAR}，避免把密钥写入配置文件。"""
+    """递归展开配置中的 ${ENV_VAR}，避免把密钥写入配置文件。
+
+    只展开 ${VAR} 形式（裸 $foo 不动，避免误改含 $ 的普通配置值）；
+    环境变量未定义时保留字面量并告警，方便发现漏配。
+    """
     if isinstance(value, str):
-        return os.path.expandvars(value)
+        def _replace(match: re.Match) -> str:
+            env_name = match.group(1)
+            env_value = os.environ.get(env_name)
+            if env_value is None:
+                logger.warning(
+                    f"配置中引用的环境变量 {env_name} 未定义，保留字面量 ${{{env_name}}}"
+                )
+                return match.group(0)
+            return env_value
+
+        return _ENV_VAR_PATTERN.sub(_replace, value)
     if isinstance(value, list):
         return [expand_env_vars(item) for item in value]
     if isinstance(value, Mapping):
