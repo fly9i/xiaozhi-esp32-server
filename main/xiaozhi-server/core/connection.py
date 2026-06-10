@@ -995,11 +995,11 @@ class ConnectionHandler:
         if not text:
             return []
 
-        # 带时间节奏/序列意图的请求（每隔N秒、依次、轮流、保持X秒…）不走直通，
+        # 带时间节奏/序列/次数意图的请求（每隔N秒、依次、轮流、保持X秒、闪3次…）不走直通，
         # 让 LLM 去调用 run_timed_sequence 按节奏执行，避免被一次性瞬间执行掉。
         sequence_hints = ("每隔", "间隔", "依次", "轮流", "循环", "轮播", "保持", "停留")
         if any(hint in text for hint in sequence_hints) or re.search(
-            r"(\d+|[两二三四五六七八九十])\s*秒", text
+            r"(\d+|[两二三四五六七八九十])\s*[秒次遍]", text
         ):
             return []
 
@@ -1183,9 +1183,17 @@ class ConnectionHandler:
         if min_required is None and not has_multiple_goal:
             return None
 
+        # 用户给了明确数字时严格按用户说的来，不做下限钳制；
+        # 明确只要 1 个时无需数量目标追踪。模糊表述（“来几个”“多条”）默认 3。
+        if min_required is not None:
+            if min_required <= 1:
+                return None
+        else:
+            min_required = 3
+
         return {
             "original_query": query,
-            "min_required": max(2, min_required or 3),
+            "min_required": min_required,
             "completed_units": 0,
         }
 
@@ -1220,6 +1228,15 @@ class ConnectionHandler:
         if not self.current_agent_goal:
             return
         if result.action == Action.ERROR:
+            return
+
+        # 定时序列工具一次就覆盖了整个节奏请求（“依次/轮流”类目标），
+        # 序列还在后台跑，不能再催 LLM 叠加调用其他效果，直接判定目标完成。
+        if tool_call_data.get("name") == "run_timed_sequence":
+            self.logger.bind(tag=TAG).info(
+                "run_timed_sequence 已接管节奏目标，清除Agent数量目标"
+            )
+            self.current_agent_goal = None
             return
 
         units = self._estimate_tool_result_units(result)
